@@ -1,12 +1,14 @@
+use serde::{Deserialize, Serialize};
+use serde_json;
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FileType {
     FileTypeFile,
     FileTypeDirectory,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Permissions {
     pub read: bool,
     pub write: bool,
@@ -23,7 +25,7 @@ impl Permissions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Timestamp {
     pub created: SystemTime,
     pub modified: SystemTime,
@@ -40,7 +42,7 @@ impl Timestamp {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileMetadata {
     pub id: u64,
     pub name: String,
@@ -72,5 +74,9 @@ impl FileMetadata {
             block_count,
             block_start,
         }
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        serde_json::to_vec(&self).unwrap()
     }
 }
