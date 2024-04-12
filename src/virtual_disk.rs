@@ -1,4 +1,4 @@
-use crate::metadata;
+use crate::{block_metadata, metadata};
 use serde_json::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -24,19 +24,36 @@ impl VirtualDisk {
         Ok(VirtualDisk { file })
     }
 
-    pub fn read_blocks(&mut self, block_number: u64) -> io::Result<Vec<u8>> {
-        let mut buffer = vec![0; BLOCK_SIZE as usize];
+    pub fn read_block_metadata(&mut self, block_number: u64) -> io::Result<Vec<u8>> {
+        let mut buffer = vec![0; 25 as usize];
         self.file.seek(SeekFrom::Start(block_number * BLOCK_SIZE))?;
         self.file.read_exact(&mut buffer)?;
         let utf8_string = String::from_utf8(buffer.clone()).unwrap();
         println!("{:?}", utf8_string);
-        let json_result: Result<Value, _> = serde_json::from_str(&utf8_string);
-        println!("{:?}", json_result);
+        Ok(buffer)
+    }
+
+    pub fn write_block_metadata(&mut self, block_number: u64, data: &[u8]) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(block_number * BLOCK_SIZE))?;
+        self.file.write_all(data)?;
+        Ok(())
+    }
+
+    pub fn read_blocks(&mut self, block_number: u64) -> io::Result<Vec<u8>> {
+        let mut buffer = vec![0; (BLOCK_SIZE - 25) as usize];
+        self.file
+            .seek(SeekFrom::Start(block_number * BLOCK_SIZE + 25))?;
+        self.file.read_exact(&mut buffer)?;
+        let utf8_string = String::from_utf8(buffer.clone()).unwrap();
+        println!("{:?}", utf8_string);
+        // let json_result: Result<Value, _> = serde_json::from_str(&utf8_string);
+        // println!("{:?}", json_result);
         Ok(buffer)
     }
 
     pub fn write_blocks(&mut self, block_number: u64, data: &[u8]) -> io::Result<()> {
-        self.file.seek(SeekFrom::Start(block_number * BLOCK_SIZE))?;
+        self.file
+            .seek(SeekFrom::Start(block_number * BLOCK_SIZE + 25))?;
         self.file.write_all(data)?;
         Ok(())
     }
@@ -52,6 +69,10 @@ impl VirtualDisk {
             vec![1],
         );
         let serialized_data = metadata::FileMetadata::serialize(&metadata);
+        // println!("{:?}", serialized_data.len());
+        let block_metadata = block_metadata::BlockMetadata::new(1000);
+        let serialized_block_metadata = block_metadata::BlockMetadata::serialize(&block_metadata);
+        let _ = &self.write_block_metadata(0, &serialized_block_metadata)?;
         let _ = &self.write_blocks(0, &serialized_data)?;
         Ok(())
     }
