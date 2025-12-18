@@ -1,5 +1,4 @@
-use crate::{block_metadata, metadata};
-use serde_json::Value;
+use crate::{bitmap::BlockBitmap, block_metadata, metadata};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
@@ -10,18 +9,33 @@ const TOTAL_BLOCKS: u64 = (DISK_SIZE) / (BLOCK_SIZE);
 #[derive(Debug)]
 pub struct VirtualDisk {
     file: File,
+    bitmap: BlockBitmap,
 }
 
 impl VirtualDisk {
     pub fn new(path: &str) -> io::Result<VirtualDisk> {
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(path)?;
+        
+        let file_metadata = file.metadata()?;
+        let is_new_disk = file_metadata.len() == 0;
+        
         file.set_len(DISK_SIZE)?;
 
-        Ok(VirtualDisk { file })
+        let bitmap = if is_new_disk {
+            // Create new bitmap for fresh disk
+            let bitmap = BlockBitmap::new(TOTAL_BLOCKS, BLOCK_SIZE);
+            bitmap.save(&mut file, BLOCK_SIZE)?;
+            bitmap
+        } else {
+            // Load existing bitmap from disk
+            BlockBitmap::load(&mut file, TOTAL_BLOCKS, BLOCK_SIZE)?
+        };
+
+        Ok(VirtualDisk { file, bitmap })
     }
 
     pub fn read_block_metadata(&mut self, block_number: u64) -> io::Result<Vec<u8>> {
@@ -77,27 +91,63 @@ impl VirtualDisk {
         Ok(())
     }
 
-    // pub fn allocate_metadata(&mut self, metadata: &metadata::FileMetadata) -> io::Result<u64> {
-    //     let mut block_number = 0;
-    //     let mut found = false;
-    //     let mut buffer = vec![0; BLOCK_SIZE as usize];
-    //     while block_number < TOTAL_BLOCKS {
-    //         self.file.seek(SeekFrom::Start(block_number * BLOCK_SIZE))?;
-    //         self.file.read_exact(&mut buffer)?;
-    //         let metadata: metadata::FileMetadata = serde_json::from_slice(&buffer).unwrap();
-    //         if metadata.id == 0 {
-    //             found = true;
-    //             break;
-    //         }
-    //         block_number += 1;
-    //     }
-    //
-    //     if found {
-    //         let serialized_data = metadata::FileMetadata::serialize(metadata);
-    //         self.write_blocks(block_number, &serialized_data)?;
-    //         Ok(block_number)
-    //     } else {
-    //         Err(io::Error::new(io::ErrorKind::Other, "No space left"))
-    //     }
-    // }
+    /// Allocate a single free block
+    /// Returns the block number if successful, or an error if disk is full
+    pub fn allocate_block(&mut self) -> io::Result<u64> {
+        self.bitmap
+            .allocate_block()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Disk is full"))
+    }
+
+    /// Allocate multiple contiguous blocks
+    /// Returns the starting block number if successful.
+    pub fn allocate_contiguous_blocks(&mut self, count: u64) -> io::Result<u64> {
+        self.bitmap
+            .allocate_contiguous(count)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Not enough contiguous space"))
+    }
+
+    /// Free a previously allocated block
+    pub fn free_block(&mut self, block: u64) -> io::Result<()> {
+        self.bitmap.free_block(block);
+        self.bitmap.save(&mut self.file, BLOCK_SIZE)?;
+        Ok(())
+    }
+
+    /// Free multiple contiguous blocks
+    pub fn free_blocks(&mut self, start: u64, count: u64) -> io::Result<()> {
+        self.bitmap.free_blocks(start, count);
+        self.bitmap.save(&mut self.file, BLOCK_SIZE)?;
+        Ok(())
+    }
+
+    /// Check if a block is currently in use
+    pub fn is_block_used(&self, block: u64) -> bool {
+        self.bitmap.is_block_used(block)
+    }
+
+    /// Get the total number of blocks in the file system
+    pub fn total_blocks(&self) -> u64 {
+        self.bitmap.total_blocks()
+    }
+
+    /// Get the number of free blocks available
+    pub fn free_blocks_count(&self) -> u64 {
+        self.bitmap.count_free_blocks()
+    }
+
+    /// Get the number of used blocks
+    pub fn used_blocks_count(&self) -> u64 {
+        self.bitmap.count_used_blocks()
+    }
+
+    /// Get disk utilization as a percentage (0.0 to 100.0)
+    pub fn utilization(&self) -> f64 {
+        self.bitmap.utilization()
+    }
+
+    /// Save the current bitmap state to disk
+    pub fn sync_bitmap(&mut self) -> io::Result<()> {
+        self.bitmap.save(&mut self.file, BLOCK_SIZE)
+    }
 }

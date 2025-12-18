@@ -1,3 +1,4 @@
+pub mod bitmap;
 pub mod block_metadata;
 pub mod file_operations;
 pub mod metadata;
