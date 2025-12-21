@@ -1,6 +1,6 @@
-use crate::{bitmap::BlockBitmap, block_metadata, metadata};
+use crate::{bitmap::BlockBitmap, block_metadata, error::FsResult, metadata};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 const DISK_SIZE: u64 = 100 * 1024 * 1024;
 const BLOCK_SIZE: u64 = 4 * 1024;
@@ -13,7 +13,7 @@ pub struct VirtualDisk {
 }
 
 impl VirtualDisk {
-    pub fn new(path: &str) -> io::Result<VirtualDisk> {
+    pub fn new(path: &str) -> FsResult<VirtualDisk> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -38,41 +38,41 @@ impl VirtualDisk {
         Ok(VirtualDisk { file, bitmap })
     }
 
-    pub fn read_block_metadata(&mut self, block_number: u64) -> io::Result<Vec<u8>> {
+    pub fn read_block_metadata(&mut self, block_number: u64) -> FsResult<Vec<u8>> {
         let mut buffer = vec![0; 25 as usize];
         self.file.seek(SeekFrom::Start(block_number * BLOCK_SIZE))?;
         self.file.read_exact(&mut buffer)?;
-        let utf8_string = String::from_utf8(buffer.clone()).unwrap();
+        let utf8_string = String::from_utf8(buffer.clone())?;
         println!("{:?}", utf8_string);
         Ok(buffer)
     }
 
-    pub fn write_block_metadata(&mut self, block_number: u64, data: &[u8]) -> io::Result<()> {
+    pub fn write_block_metadata(&mut self, block_number: u64, data: &[u8]) -> FsResult<()> {
         self.file.seek(SeekFrom::Start(block_number * BLOCK_SIZE))?;
         self.file.write_all(data)?;
         Ok(())
     }
 
-    pub fn read_blocks(&mut self, block_number: u64) -> io::Result<Vec<u8>> {
+    pub fn read_blocks(&mut self, block_number: u64) -> FsResult<Vec<u8>> {
         let mut buffer = vec![0; (BLOCK_SIZE - 25) as usize];
         self.file
             .seek(SeekFrom::Start(block_number * BLOCK_SIZE + 25))?;
         self.file.read_exact(&mut buffer)?;
-        let utf8_string = String::from_utf8(buffer.clone()).unwrap();
+        let utf8_string = String::from_utf8(buffer.clone())?;
         println!("{:?}", utf8_string);
         // let json_result: Result<Value, _> = serde_json::from_str(&utf8_string);
         // println!("{:?}", json_result);
         Ok(buffer)
     }
 
-    pub fn write_blocks(&mut self, block_number: u64, data: &[u8]) -> io::Result<()> {
+    pub fn write_blocks(&mut self, block_number: u64, data: &[u8]) -> FsResult<()> {
         self.file
             .seek(SeekFrom::Start(block_number * BLOCK_SIZE + 25))?;
         self.file.write_all(data)?;
         Ok(())
     }
 
-    pub fn initialize_root_dir(&mut self) -> io::Result<()> {
+    pub fn initialize_root_dir(&mut self) -> FsResult<()> {
         let metadata = metadata::FileMetadata::new(
             0,
             String::from("/"),
@@ -92,30 +92,33 @@ impl VirtualDisk {
     }
 
     /// Allocate a single free block
+    /// 
     /// Returns the block number if successful, or an error if disk is full
-    pub fn allocate_block(&mut self) -> io::Result<u64> {
-        self.bitmap
-            .allocate_block()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Disk is full"))
+    pub fn allocate_block(&mut self) -> FsResult<u64> {
+        let block = self.bitmap.allocate_block()?;
+        self.bitmap.save(&mut self.file, BLOCK_SIZE)?;
+        Ok(block)
     }
 
     /// Allocate multiple contiguous blocks
+    /// 
+    /// This is more efficient for large files as it reduces fragmentation.
     /// Returns the starting block number if successful.
-    pub fn allocate_contiguous_blocks(&mut self, count: u64) -> io::Result<u64> {
-        self.bitmap
-            .allocate_contiguous(count)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Not enough contiguous space"))
+    pub fn allocate_contiguous_blocks(&mut self, count: u64) -> FsResult<u64> {
+        let start = self.bitmap.allocate_contiguous(count)?;
+        self.bitmap.save(&mut self.file, BLOCK_SIZE)?;
+        Ok(start)
     }
 
     /// Free a previously allocated block
-    pub fn free_block(&mut self, block: u64) -> io::Result<()> {
+    pub fn free_block(&mut self, block: u64) -> FsResult<()> {
         self.bitmap.free_block(block);
         self.bitmap.save(&mut self.file, BLOCK_SIZE)?;
         Ok(())
     }
 
     /// Free multiple contiguous blocks
-    pub fn free_blocks(&mut self, start: u64, count: u64) -> io::Result<()> {
+    pub fn free_blocks(&mut self, start: u64, count: u64) -> FsResult<()> {
         self.bitmap.free_blocks(start, count);
         self.bitmap.save(&mut self.file, BLOCK_SIZE)?;
         Ok(())
@@ -147,7 +150,7 @@ impl VirtualDisk {
     }
 
     /// Save the current bitmap state to disk
-    pub fn sync_bitmap(&mut self) -> io::Result<()> {
+    pub fn sync_bitmap(&mut self) -> FsResult<()> {
         self.bitmap.save(&mut self.file, BLOCK_SIZE)
     }
 }

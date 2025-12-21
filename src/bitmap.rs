@@ -1,5 +1,6 @@
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use crate::error::{FsError, FsResult};
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Bitmap-based block allocator for tracking free and used blocks
 /// The bitmap is stored at the beginning of the virtual disk.
@@ -43,7 +44,7 @@ impl BlockBitmap {
     }
 
     /// Load bitmap from disk
-    pub fn load(file: &mut File, total_blocks: u64, block_size: u64) -> io::Result<Self> {
+    pub fn load(file: &mut File, total_blocks: u64, block_size: u64) -> FsResult<Self> {
         let bitmap_blocks = Self::calculate_bitmap_blocks(total_blocks, block_size);
         let bitmap_bytes = ((total_blocks + 7) / 8) as usize;
         
@@ -61,7 +62,7 @@ impl BlockBitmap {
     }
 
     /// Save bitmap to disk
-    pub fn save(&self, file: &mut File, block_size: u64) -> io::Result<()> {
+    pub fn save(&self, file: &mut File, block_size: u64) -> FsResult<()> {
         // Bitmap starts after superblock (block 0)
         file.seek(SeekFrom::Start(block_size))?;
         file.write_all(&self.bitmap)?;
@@ -70,22 +71,22 @@ impl BlockBitmap {
     }
 
     /// Allocate a single free block
-    /// Returns the block number if successful, or None if disk is full
-    pub fn allocate_block(&mut self) -> Option<u64> {
+    /// Returns the block number if successful, or error if disk is full
+    pub fn allocate_block(&mut self) -> FsResult<u64> {
         for block in 0..self.total_blocks {
             if !self.is_block_used(block) {
                 self.mark_used(block);
-                return Some(block);
+                return Ok(block);
             }
         }
-        None
+        Err(FsError::DiskFull)
     }
 
     /// Allocate multiple contiguous blocks
     /// Returns the starting block number if successful
-    pub fn allocate_contiguous(&mut self, count: u64) -> Option<u64> {
+    pub fn allocate_contiguous(&mut self, count: u64) -> FsResult<u64> {
         if count == 0 {
-            return None;
+            return Err(FsError::InvalidOffsetOrSize { offset: 0, size: 0 });
         }
 
         let mut start = 0;
@@ -103,14 +104,14 @@ impl BlockBitmap {
                     for b in start..(start + count) {
                         self.mark_used(b);
                     }
-                    return Some(start);
+                    return Ok(start);
                 }
             } else {
                 consecutive = 0;
             }
         }
 
-        None
+        Err(FsError::NotEnoughContiguousSpace(count))
     }
 
     /// Free a block, making it available for allocation
