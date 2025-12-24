@@ -1,4 +1,8 @@
-use crate::{bitmap::BlockBitmap, block_metadata, error::FsResult, metadata};
+use crate::{
+    bitmap::BlockBitmap, 
+    error::FsResult, 
+    serialization::{Inode, DirectoryEntry, FileType, Permissions, INODE_SIZE},
+};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -73,22 +77,62 @@ impl VirtualDisk {
     }
 
     pub fn initialize_root_dir(&mut self) -> FsResult<()> {
-        let metadata = metadata::FileMetadata::new(
-            0,
-            String::from("/"),
-            metadata::FileType::FileTypeDirectory,
-            metadata::Permissions::new(true, true, true),
-            0,
-            0,
-            vec![1],
-        );
-        let serialized_data = metadata::FileMetadata::serialize(&metadata);
-        // println!("{:?}", serialized_data.len());
-        let block_metadata = block_metadata::BlockMetadata::new(1000);
-        let serialized_block_metadata = block_metadata::BlockMetadata::serialize(&block_metadata);
-        let _ = &self.write_block_metadata(0, &serialized_block_metadata)?;
-        let _ = &self.write_blocks(0, &serialized_data)?;
+        // Allocate a block for root directory inode
+        let root_block = self.allocate_block()?;
+        
+        // Create root directory inode (inode 0)
+        let perms = Permissions::new(true, true, true);
+        let root_inode = Inode::new(0, FileType::Directory, perms);
+        
+        // Write root inode to disk
+        self.write_inode(root_block, &root_inode)?;
+        
         Ok(())
+    }
+
+    /// Write an inode to a specific block
+    pub fn write_inode(&mut self, block_number: u64, inode: &Inode) -> FsResult<()> {
+        let bytes = inode.to_bytes();
+        self.file.seek(SeekFrom::Start(block_number * BLOCK_SIZE))?;
+        self.file.write_all(&bytes)?;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    /// Read an inode from a specific block
+    pub fn read_inode(&mut self, block_number: u64) -> FsResult<Inode> {
+        let mut buffer = [0u8; INODE_SIZE];
+        self.file.seek(SeekFrom::Start(block_number * BLOCK_SIZE))?;
+        self.file.read_exact(&mut buffer)?;
+        Inode::from_bytes(&buffer)
+    }
+
+    /// Write a directory entry to a specific offset in a block
+    pub fn write_dir_entry(
+        &mut self,
+        block_number: u64,
+        entry_index: usize,
+        entry: &DirectoryEntry,
+    ) -> FsResult<()> {
+        let bytes = entry.to_bytes();
+        let offset = block_number * BLOCK_SIZE + (entry_index * DirectoryEntry::ENTRY_SIZE) as u64;
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.write_all(&bytes)?;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    /// Read a directory entry from a specific offset in a block
+    pub fn read_dir_entry(
+        &mut self,
+        block_number: u64,
+        entry_index: usize,
+    ) -> FsResult<DirectoryEntry> {
+        let mut buffer = [0u8; DirectoryEntry::ENTRY_SIZE];
+        let offset = block_number * BLOCK_SIZE + (entry_index * DirectoryEntry::ENTRY_SIZE) as u64;
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.read_exact(&mut buffer)?;
+        DirectoryEntry::from_bytes(&buffer)
     }
 
     /// Allocate a single free block
