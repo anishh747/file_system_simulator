@@ -1,79 +1,80 @@
 use file_system_simulator::virtual_disk::VirtualDisk;
-use file_system_simulator::serialization::{Inode, DirectoryEntry, FileType, Permissions};
+use file_system_simulator::serialization::Permissions;
 
 fn main() {
-    println!("=== File System Simulator - Binary Serialization Demo ===\n");
+    println!("=== File System Simulator - File Operations Demo ===\n");
     
     let mut disk = VirtualDisk::new("/Users/anishtimalsina/Desktop/projects/file_system_simulator/test.txt").unwrap();
     
-    // Display disk statistics
-    println!("Disk Statistics:");
+    // Display initial disk statistics
+    println!("Initial Disk Statistics:");
     println!("  Total blocks: {}", disk.total_blocks());
+    println!("  Free blocks: {}", disk.free_blocks_count());
+    println!("  Utilization: {:.2}%\n", disk.utilization());
+    
+    // Create a file
+    println!("Creating file...");
+    let perms = Permissions::new(true, true, false);
+    let file_inode_block = disk.create_file(1, perms).unwrap();
+    println!("  File created with inode at block {}\n", file_inode_block);
+    
+    // Write data to the file
+    println!("Writing data to file...");
+    let data = b"Hello, File System! This is a test file with some content.";
+    disk.write_file(file_inode_block, data).unwrap();
+    println!("  Written {} bytes\n", data.len());
+    
+    // Read the file info
+    println!("Reading file info...");
+    let info = disk.get_file_info(file_inode_block).unwrap();
+    println!("  Inode number: {}", info.inode_number);
+    println!("  File type: {:?}", info.file_type);
+    println!("  Size: {} bytes", info.size);
+    println!("  Block count: {}", info.block_count);
+    println!("  Permissions: r={}, w={}, x={}\n", 
+             perms.read(), perms.write(), perms.execute());
+    
+    // Read the file back
+    println!("Reading file contents...");
+    let read_data = disk.read_file(file_inode_block).unwrap();
+    let content = String::from_utf8(read_data.clone()).unwrap();
+    println!("  Read {} bytes", read_data.len());
+    println!("  Content: \"{}\"\n", content);
+    
+    // Verify data integrity
+    assert_eq!(data.to_vec(), read_data);
+    println!("  ✓ Data integrity verified\n");
+    
+    // Test with larger file (multi-block)
+    println!("Testing multi-block file...");
+    let large_data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
+    disk.write_file(file_inode_block, &large_data).unwrap();
+    println!("  Written {} bytes", large_data.len());
+    
+    let info = disk.get_file_info(file_inode_block).unwrap();
+    println!("  File now uses {} blocks\n", info.block_count);
+    
+    // Read large file back
+    let read_large = disk.read_file(file_inode_block).unwrap();
+    assert_eq!(large_data, read_large);
+    println!("  ✓ Large file read successfully\n");
+    
+    // Display disk statistics after operations
+    println!("Disk Statistics After File Operations:");
     println!("  Used blocks: {}", disk.used_blocks_count());
     println!("  Free blocks: {}", disk.free_blocks_count());
     println!("  Utilization: {:.2}%\n", disk.utilization());
     
-    // Initialize root directory
-    println!("Initializing root directory...");
-    disk.initialize_root_dir().unwrap();
-    println!("  Root directory created\n");
-    
-    // Create and write a test inode
-    println!("Creating test file inode...");
-    let perms = Permissions::new(true, true, false);
-    let mut file_inode = Inode::new(1, FileType::File, perms);
-    file_inode.size = 1024;
-    file_inode.block_count = 1;
-    
-    let file_block = disk.allocate_block().unwrap();
-    disk.write_inode(file_block, &file_inode).unwrap();
-    println!("  File inode written to block {}", file_block);
-    println!("  Inode number: {}", file_inode.inode_number);
-    println!("  File type: {:?}", file_inode.file_type);
-    println!("  Size: {} bytes", file_inode.size);
-    println!("  Permissions: r={}, w={}, x={}\n", 
-             perms.read(), perms.write(), perms.execute());
-    
-    // Read the inode back
-    println!("Reading inode back from disk...");
-    let read_inode = disk.read_inode(file_block).unwrap();
-    println!("  Inode number: {}", read_inode.inode_number);
-    println!("  File type: {:?}", read_inode.file_type);
-    println!("  Size: {} bytes", read_inode.size);
-    println!("  Block count: {}", read_inode.block_count);
-    
-    // Verify data integrity
-    assert_eq!(file_inode.inode_number, read_inode.inode_number);
-    assert_eq!(file_inode.size, read_inode.size);
-    println!("  ✓ Data integrity verified\n");
-    
-    // Create directory entries
-    println!("Creating directory entries...");
-    let dir_block = disk.allocate_block().unwrap();
-    
-    let entry1 = DirectoryEntry::new(1, FileType::File, "test.txt".to_string()).unwrap();
-    let entry2 = DirectoryEntry::new(2, FileType::Directory, "documents".to_string()).unwrap();
-    let entry3 = DirectoryEntry::new(3, FileType::File, "readme.md".to_string()).unwrap();
-    
-    disk.write_dir_entry(dir_block, 0, &entry1).unwrap();
-    disk.write_dir_entry(dir_block, 1, &entry2).unwrap();
-    disk.write_dir_entry(dir_block, 2, &entry3).unwrap();
-    
-    println!("  Written 3 directory entries to block {}", dir_block);
-    
-    // Read directory entries back
-    println!("\nReading directory entries...");
-    for i in 0..3 {
-        let entry = disk.read_dir_entry(dir_block, i).unwrap();
-        println!("  Entry {}: inode={}, type={:?}, name='{}'", 
-                 i, entry.inode_number, entry.file_type, entry.name);
-    }
+    // Delete the file
+    println!("Deleting file...");
+    disk.delete_file(file_inode_block).unwrap();
+    println!("  File deleted\n");
     
     // Final statistics
-    println!("\nFinal Disk Statistics:");
+    println!("Final Disk Statistics:");
     println!("  Used blocks: {}", disk.used_blocks_count());
     println!("  Free blocks: {}", disk.free_blocks_count());
     println!("  Utilization: {:.2}%", disk.utilization());
     
-    println!("\n✓ Binary serialization test completed successfully!");
+    println!("\n✓ File operations test completed successfully!");
 }

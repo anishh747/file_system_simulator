@@ -1,7 +1,7 @@
 use crate::{
     bitmap::BlockBitmap, 
-    error::FsResult, 
-    serialization::{Inode, DirectoryEntry, FileType, Permissions, INODE_SIZE},
+    error::{FsError, FsResult}, 
+    serialization::{Inode, DirectoryEntry, FileType, Permissions, INODE_SIZE, DIRECT_POINTERS},
 };
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -40,40 +40,6 @@ impl VirtualDisk {
         };
 
         Ok(VirtualDisk { file, bitmap })
-    }
-
-    pub fn read_block_metadata(&mut self, block_number: u64) -> FsResult<Vec<u8>> {
-        let mut buffer = vec![0; 25 as usize];
-        self.file.seek(SeekFrom::Start(block_number * BLOCK_SIZE))?;
-        self.file.read_exact(&mut buffer)?;
-        let utf8_string = String::from_utf8(buffer.clone())?;
-        println!("{:?}", utf8_string);
-        Ok(buffer)
-    }
-
-    pub fn write_block_metadata(&mut self, block_number: u64, data: &[u8]) -> FsResult<()> {
-        self.file.seek(SeekFrom::Start(block_number * BLOCK_SIZE))?;
-        self.file.write_all(data)?;
-        Ok(())
-    }
-
-    pub fn read_blocks(&mut self, block_number: u64) -> FsResult<Vec<u8>> {
-        let mut buffer = vec![0; (BLOCK_SIZE - 25) as usize];
-        self.file
-            .seek(SeekFrom::Start(block_number * BLOCK_SIZE + 25))?;
-        self.file.read_exact(&mut buffer)?;
-        let utf8_string = String::from_utf8(buffer.clone())?;
-        println!("{:?}", utf8_string);
-        // let json_result: Result<Value, _> = serde_json::from_str(&utf8_string);
-        // println!("{:?}", json_result);
-        Ok(buffer)
-    }
-
-    pub fn write_blocks(&mut self, block_number: u64, data: &[u8]) -> FsResult<()> {
-        self.file
-            .seek(SeekFrom::Start(block_number * BLOCK_SIZE + 25))?;
-        self.file.write_all(data)?;
-        Ok(())
     }
 
     pub fn initialize_root_dir(&mut self) -> FsResult<()> {
@@ -135,9 +101,173 @@ impl VirtualDisk {
         DirectoryEntry::from_bytes(&buffer)
     }
 
-    /// Allocate a single free block
+    // ==================== FILE OPERATIONS ====================
+
+    /// Create a new file and return its inode block number
     /// 
-    /// Returns the block number if successful, or an error if disk is full
+    /// This allocates an inode block and initializes it with file metadata
+    pub fn create_file(
+        &mut self,
+        inode_number: u64,
+        permissions: Permissions,
+    ) -> FsResult<u64> {
+        // Allocate a block for the inode
+        let inode_block = self.allocate_block()?;
+        
+        // Create the inode
+        let inode = Inode::new(inode_number, FileType::File, permissions);
+        
+        // Write inode to disk
+        self.write_inode(inode_block, &inode)?;
+        
+        Ok(inode_block)
+    }
+
+    /// Write data to a file
+    /// 
+    /// This handles multi-block files by allocating blocks as needed
+    /// and updating the inode's block pointers
+    pub fn write_file(
+        &mut self,
+        inode_block: u64,
+        data: &[u8],
+    ) -> FsResult<()> {
+        // Read the current inode
+        let mut inode = self.read_inode(inode_block)?;
+        
+        // Verify it's a file
+        if inode.file_type != FileType::File {
+            return Err(FsError::NotAFile(format!("Inode {} is not a file", inode.inode_number)));
+        }
+        
+        // Calculate how many blocks we need
+        let blocks_needed = ((data.len() as u64 + BLOCK_SIZE - 1) / BLOCK_SIZE) as usize;
+        
+        if blocks_needed > DIRECT_POINTERS {
+            return Err(FsError::NotSupported(
+                format!("File size {} bytes requires {} blocks, but only {} direct pointers supported", 
+                        data.len(), blocks_needed, DIRECT_POINTERS)
+            ));
+        }
+        
+        // Free old blocks if they exist
+        for i in 0..inode.block_count as usize {
+            if inode.direct_blocks[i] != 0 {
+                self.free_block(inode.direct_blocks[i])?;
+                inode.direct_blocks[i] = 0;
+            }
+        }
+        
+        // Allocate new blocks and write data
+        let mut offset = 0;
+        for i in 0..blocks_needed {
+            let block = self.allocate_block()?;
+            inode.direct_blocks[i] = block;
+            
+            // Calculate how much data to write to this block
+            let remaining = data.len() - offset;
+            let to_write = remaining.min(BLOCK_SIZE as usize);
+            
+            // Write data to block
+            self.file.seek(SeekFrom::Start(block * BLOCK_SIZE))?;
+            self.file.write_all(&data[offset..offset + to_write])?;
+            
+            offset += to_write;
+        }
+        
+        // Update inode metadata
+        inode.size = data.len() as u64;
+        inode.block_count = blocks_needed as u64;
+        inode.modified = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
+        // Write updated inode back to disk
+        self.write_inode(inode_block, &inode)?;
+        self.file.flush()?;
+        
+        Ok(())
+    }
+
+    /// Read data from a file
+    /// 
+    /// Reads the entire file contents by following the inode's block pointers
+    pub fn read_file(&mut self, inode_block: u64) -> FsResult<Vec<u8>> {
+        // Read the inode
+        let inode = self.read_inode(inode_block)?;
+        
+        // Verify it's a file
+        if inode.file_type != FileType::File {
+            return Err(FsError::NotAFile(format!("Inode {} is not a file", inode.inode_number)));
+        }
+        
+        // Allocate buffer for file data
+        let mut data = Vec::with_capacity(inode.size as usize);
+        
+        // Read each block
+        let mut remaining = inode.size;
+        for i in 0..inode.block_count as usize {
+            let block = inode.direct_blocks[i];
+            if block == 0 {
+                return Err(FsError::CorruptedFileSystem(
+                    format!("Inode {} has null block pointer at index {}", inode.inode_number, i)
+                ));
+            }
+            
+            // Read block data
+            let to_read = remaining.min(BLOCK_SIZE);
+            let mut buffer = vec![0u8; to_read as usize];
+            
+            self.file.seek(SeekFrom::Start(block * BLOCK_SIZE))?;
+            self.file.read_exact(&mut buffer)?;
+            
+            data.extend_from_slice(&buffer);
+            remaining -= to_read;
+        }
+        
+        Ok(data)
+    }
+
+    /// Delete a file
+    /// 
+    /// Frees all blocks used by the file including the inode block
+    pub fn delete_file(&mut self, inode_block: u64) -> FsResult<()> {
+        // Read the inode
+        let inode = self.read_inode(inode_block)?;
+        
+        // Verify it's a file
+        if inode.file_type != FileType::File {
+            return Err(FsError::NotAFile(format!("Inode {} is not a file", inode.inode_number)));
+        }
+        
+        // Free all data blocks
+        for i in 0..inode.block_count as usize {
+            if inode.direct_blocks[i] != 0 {
+                self.free_block(inode.direct_blocks[i])?;
+            }
+        }
+        
+        // Free the inode block itself
+        self.free_block(inode_block)?;
+        
+        Ok(())
+    }
+
+    /// Get file information
+    pub fn get_file_info(&mut self, inode_block: u64) -> FsResult<Inode> {
+        let inode = self.read_inode(inode_block)?;
+        
+        if inode.file_type != FileType::File {
+            return Err(FsError::NotAFile(format!("Inode {} is not a file", inode.inode_number)));
+        }
+        
+        Ok(inode)
+    }
+
+    // ==================== BLOCK ALLOCATION ====================
+
+    /// Allocate a single free block
     pub fn allocate_block(&mut self) -> FsResult<u64> {
         let block = self.bitmap.allocate_block()?;
         self.bitmap.save(&mut self.file, BLOCK_SIZE)?;
@@ -145,9 +275,6 @@ impl VirtualDisk {
     }
 
     /// Allocate multiple contiguous blocks
-    /// 
-    /// This is more efficient for large files as it reduces fragmentation.
-    /// Returns the starting block number if successful.
     pub fn allocate_contiguous_blocks(&mut self, count: u64) -> FsResult<u64> {
         let start = self.bitmap.allocate_contiguous(count)?;
         self.bitmap.save(&mut self.file, BLOCK_SIZE)?;
