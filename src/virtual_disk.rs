@@ -265,6 +265,203 @@ impl VirtualDisk {
         Ok(inode)
     }
 
+    // ==================== DIRECTORY OPERATIONS ====================
+
+    /// Create a new directory and return its inode block number
+    pub fn create_directory(
+        &mut self,
+        inode_number: u64,
+        permissions: Permissions,
+    ) -> FsResult<u64> {
+        // Allocate a block for the directory inode
+        let inode_block = self.allocate_block()?;
+        
+        // Allocate a block for directory entries
+        let entries_block = self.allocate_block()?;
+        
+        // Create the directory inode
+        let mut inode = Inode::new(inode_number, FileType::Directory, permissions);
+        inode.direct_blocks[0] = entries_block;
+        inode.block_count = 1;
+        
+        // Write inode to disk
+        self.write_inode(inode_block, &inode)?;
+        
+        Ok(inode_block)
+    }
+
+    /// Add an entry to a directory
+    pub fn add_directory_entry(
+        &mut self,
+        dir_inode_block: u64,
+        entry: DirectoryEntry,
+    ) -> FsResult<()> {
+        // Read the directory inode
+        let inode = self.read_inode(dir_inode_block)?;
+        
+        // Verify it's a directory
+        if inode.file_type != FileType::Directory {
+            return Err(FsError::NotADirectory(format!("Inode {} is not a directory", inode.inode_number)));
+        }
+        
+        // Get the directory entries block
+        let entries_block = inode.direct_blocks[0];
+        if entries_block == 0 {
+            return Err(FsError::CorruptedFileSystem("Directory has no entries block".to_string()));
+        }
+        
+        // Calculate how many entries fit in a block
+        let entries_per_block = (BLOCK_SIZE as usize) / DirectoryEntry::ENTRY_SIZE;
+        
+        // Find first empty slot
+        for i in 0..entries_per_block {
+            // Try to read existing entry
+            match self.read_dir_entry(entries_block, i) {
+                Ok(_) => continue, // Slot occupied
+                Err(FsError::InvalidMetadata(_)) => {
+                    // Empty slot found, write new entry
+                    self.write_dir_entry(entries_block, i, &entry)?;
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        
+        Err(FsError::NotSupported("Directory is full".to_string()))
+    }
+
+    /// Remove an entry from a directory by name
+    pub fn remove_directory_entry(
+        &mut self,
+        dir_inode_block: u64,
+        name: &str,
+    ) -> FsResult<u64> {
+        // Read the directory inode
+        let inode = self.read_inode(dir_inode_block)?;
+        
+        // Verify it's a directory
+        if inode.file_type != FileType::Directory {
+            return Err(FsError::NotADirectory(format!("Inode {} is not a directory", inode.inode_number)));
+        }
+        
+        // Get the directory entries block
+        let entries_block = inode.direct_blocks[0];
+        if entries_block == 0 {
+            return Err(FsError::CorruptedFileSystem("Directory has no entries block".to_string()));
+        }
+        
+        // Calculate how many entries fit in a block
+        let entries_per_block = (BLOCK_SIZE as usize) / DirectoryEntry::ENTRY_SIZE;
+        
+        // Find and remove the entry
+        for i in 0..entries_per_block {
+            match self.read_dir_entry(entries_block, i) {
+                Ok(entry) => {
+                    if entry.name == name {
+                        // Found it! Clear the entry by writing zeros
+                        let empty_entry = [0u8; DirectoryEntry::ENTRY_SIZE];
+                        let offset = entries_block * BLOCK_SIZE + (i * DirectoryEntry::ENTRY_SIZE) as u64;
+                        self.file.seek(SeekFrom::Start(offset))?;
+                        self.file.write_all(&empty_entry)?;
+                        self.file.flush()?;
+                        return Ok(entry.inode_number);
+                    }
+                }
+                Err(FsError::InvalidMetadata(_)) => continue, // Empty slot
+                Err(e) => return Err(e),
+            }
+        }
+        
+        Err(FsError::FileNotFound(name.to_string()))
+    }
+
+    /// List all entries in a directory
+    pub fn list_directory(&mut self, dir_inode_block: u64) -> FsResult<Vec<DirectoryEntry>> {
+        // Read the directory inode
+        let inode = self.read_inode(dir_inode_block)?;
+        
+        // Verify it's a directory
+        if inode.file_type != FileType::Directory {
+            return Err(FsError::NotADirectory(format!("Inode {} is not a directory", inode.inode_number)));
+        }
+        
+        // Get the directory entries block
+        let entries_block = inode.direct_blocks[0];
+        if entries_block == 0 {
+            return Err(FsError::CorruptedFileSystem("Directory has no entries block".to_string()));
+        }
+        
+        // Calculate how many entries fit in a block
+        let entries_per_block = (BLOCK_SIZE as usize) / DirectoryEntry::ENTRY_SIZE;
+        
+        // Collect all valid entries
+        let mut entries = Vec::new();
+        for i in 0..entries_per_block {
+            match self.read_dir_entry(entries_block, i) {
+                Ok(entry) => entries.push(entry),
+                Err(FsError::InvalidMetadata(_)) => continue, // Empty slot
+                Err(e) => return Err(e),
+            }
+        }
+        
+        Ok(entries)
+    }
+
+    /// Find an entry in a directory by name
+    pub fn find_directory_entry(
+        &mut self,
+        dir_inode_block: u64,
+        name: &str,
+    ) -> FsResult<DirectoryEntry> {
+        let entries = self.list_directory(dir_inode_block)?;
+        
+        for entry in entries {
+            if entry.name == name {
+                return Ok(entry);
+            }
+        }
+        
+        Err(FsError::FileNotFound(name.to_string()))
+    }
+
+    /// Delete a directory (must be empty)
+    pub fn delete_directory(&mut self, dir_inode_block: u64) -> FsResult<()> {
+        // Read the directory inode
+        let inode = self.read_inode(dir_inode_block)?;
+        
+        // Verify it's a directory
+        if inode.file_type != FileType::Directory {
+            return Err(FsError::NotADirectory(format!("Inode {} is not a directory", inode.inode_number)));
+        }
+        
+        // Check if directory is empty
+        let entries = self.list_directory(dir_inode_block)?;
+        if !entries.is_empty() {
+            return Err(FsError::DirectoryNotEmpty(format!("Directory has {} entries", entries.len())));
+        }
+        
+        // Free the entries block
+        if inode.direct_blocks[0] != 0 {
+            self.free_block(inode.direct_blocks[0])?;
+        }
+        
+        // Free the inode block
+        self.free_block(dir_inode_block)?;
+        
+        Ok(())
+    }
+
+    /// Get directory information
+    pub fn get_directory_info(&mut self, dir_inode_block: u64) -> FsResult<Inode> {
+        let inode = self.read_inode(dir_inode_block)?;
+        
+        if inode.file_type != FileType::Directory {
+            return Err(FsError::NotADirectory(format!("Inode {} is not a directory", inode.inode_number)));
+        }
+        
+        Ok(inode)
+    }
+
     // ==================== BLOCK ALLOCATION ====================
 
     /// Allocate a single free block
